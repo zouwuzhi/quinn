@@ -594,6 +594,59 @@ impl Connection {
             .force_key_update()
     }
 
+    /// Dynamically switch the congestion control algorithm
+    ///
+    /// Allows switching to a different congestion control algorithm after the connection
+    /// has been established. The strategy controls how state is transferred from the old
+    /// controller to the new one.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use quinn::congestion::{CubicConfig, NewRenoConfig};
+    /// use quinn::CongestionSwitchStrategy;
+    /// use std::sync::Arc;
+    ///
+    /// # async fn example(conn: quinn::Connection) {
+    /// // Switch from Cubic to NewReno with conservative strategy
+    /// conn.set_congestion_controller(
+    ///     Arc::new(NewRenoConfig::default()),
+    ///     CongestionSwitchStrategy::Conservative,
+    /// );
+    /// # }
+    /// ```
+    pub fn set_congestion_controller(
+        &self,
+        factory: Arc<dyn proto::congestion::ControllerFactory + Send + Sync>,
+        strategy: proto::CongestionSwitchStrategy,
+    ) {
+        let mut conn = self.0.state.lock("set_congestion_controller");
+        let now = conn.runtime.now();
+        conn.inner.set_congestion_controller(factory, strategy, now);
+        conn.wake();
+    }
+
+    /// Get the name of the current congestion control algorithm
+    ///
+    /// Returns a static string identifying the congestion control algorithm currently
+    /// in use (e.g., "cubic", "bbr", "new_reno", "brutal").
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example(conn: quinn::Connection) {
+    /// let name = conn.congestion_controller_name();
+    /// println!("Current congestion controller: {}", name);
+    /// # }
+    /// ```
+    pub fn congestion_controller_name(&self) -> &'static str {
+        self.0
+            .state
+            .lock("congestion_controller_name")
+            .inner
+            .congestion_controller_name()
+    }
+
     /// Derive keying material from this connection's TLS session secrets.
     ///
     /// When both peers call this method with the same `label` and `context`
