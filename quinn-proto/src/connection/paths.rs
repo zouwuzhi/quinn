@@ -1,8 +1,9 @@
-use std::{cmp, net::SocketAddr};
+use std::{cmp, net::SocketAddr, sync::Arc};
 
 use tracing::trace;
 
 use super::{
+    CongestionSwitchStrategy,
     mtud::MtuDiscovery,
     pacing::Pacer,
     spaces::{PacketSpace, SentPacket},
@@ -146,6 +147,74 @@ impl PathData {
             .clone()
             .build(now, config.get_initial_mtu());
         self.mtud.reset(config.get_initial_mtu(), config.min_mtu);
+    }
+
+    /// Switch the congestion control algorithm
+    ///
+    /// This allows dynamically changing the congestion controller after a connection
+    /// has been established. The `strategy` parameter controls how state is transferred
+    /// from the old controller to the new one.
+    pub(super) fn set_congestion_controller(
+        &mut self,
+        factory: Arc<dyn congestion::ControllerFactory + Send + Sync>,
+        strategy: CongestionSwitchStrategy,
+        now: Instant,
+    ) {
+        let mtu = self.current_mtu();
+        let old_state = self.congestion.transferable_state();
+        let mut new_controller = factory.build(now, mtu);
+
+        match strategy {
+            CongestionSwitchStrategy::Fresh => {
+                // Use the new controller's default initial state
+            }
+            CongestionSwitchStrategy::Conservative => {
+                let conservative_cwnd = old_state
+                    .congestion_window
+                    .min(new_controller.initial_window() * 2);
+                let conservative = congestion::TransferableState {
+                    congestion_window: conservative_cwnd,
+                    ssthresh: old_state.ssthresh,
+                    in_recovery: false,
+                };
+                new_controller.apply_transferred_state(&conservative);
+            }
+            CongestionSwitchStrategy::Aggressive => {
+                if old_state.in_recovery {
+                    // Fall back to conservative when in recovery
+                    let conservative_cwnd = old_state
+                        .congestion_window
+                        .min(new_controller.initial_window() * 2);
+                    let conservative = congestion::TransferableState {
+                        congestion_window: conservative_cwnd,
+                        ssthresh: old_state.ssthresh,
+                        in_recovery: false,
+                    };
+                    new_controller.apply_transferred_state(&conservative);
+                } else {
+                    new_controller.apply_transferred_state(&old_state);
+                }
+            }
+            CongestionSwitchStrategy::WithWindow { cwnd, ssthresh } => {
+                let custom = congestion::TransferableState {
+                    congestion_window: cwnd,
+                    ssthresh,
+                    in_recovery: false,
+                };
+                new_controller.apply_transferred_state(&custom);
+            }
+        }
+
+        trace!(
+            old_controller = %self.congestion.name(),
+            new_controller = %new_controller.name(),
+            strategy = ?strategy,
+            old_cwnd = old_state.congestion_window,
+            new_cwnd = new_controller.window(),
+            "switching congestion controller"
+        );
+
+        self.congestion = new_controller;
     }
 
     /// Indicates whether we're a server that hasn't validated the peer's address and hasn't

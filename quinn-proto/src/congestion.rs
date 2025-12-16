@@ -13,6 +13,20 @@ pub use bbr::{Bbr, BbrConfig};
 pub use cubic::{Cubic, CubicConfig};
 pub use new_reno::{NewReno, NewRenoConfig};
 
+/// Transferable state between congestion controllers
+///
+/// This structure contains the common state that can be transferred
+/// when switching between different congestion control algorithms.
+#[derive(Debug, Clone, Default)]
+pub struct TransferableState {
+    /// Current congestion window in bytes
+    pub congestion_window: u64,
+    /// Slow start threshold in bytes (if applicable)
+    pub ssthresh: Option<u64>,
+    /// Whether the controller is currently in recovery
+    pub in_recovery: bool,
+}
+
 /// Common interface for different congestion controllers
 pub trait Controller: Send + Sync {
     /// One or more packets were just sent
@@ -82,6 +96,35 @@ pub trait Controller: Send + Sync {
 
     /// Returns Self for use in down-casting to extract implementation details
     fn into_any(self: Box<Self>) -> Box<dyn Any>;
+
+    /// Get the transferable state of this controller
+    ///
+    /// This is used when switching congestion control algorithms to optionally
+    /// transfer state from the old controller to the new one.
+    fn transferable_state(&self) -> TransferableState {
+        TransferableState {
+            congestion_window: self.window(),
+            ssthresh: self.metrics().ssthresh,
+            in_recovery: false,
+        }
+    }
+
+    /// Apply transferred state from a previous controller
+    ///
+    /// Returns `true` if the state was successfully applied, `false` if the
+    /// controller does not support state transfer (in which case Fresh strategy
+    /// should be used).
+    #[allow(unused_variables)]
+    fn apply_transferred_state(&mut self, state: &TransferableState) -> bool {
+        false
+    }
+
+    /// Get the name of this congestion controller
+    ///
+    /// Used for debugging, logging, and metrics.
+    fn name(&self) -> &'static str {
+        "unknown"
+    }
 }
 
 /// Common congestion controller metrics

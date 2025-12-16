@@ -10,7 +10,7 @@ use crate::congestion::bbr::min_max::MinMax;
 use crate::connection::RttEstimator;
 use crate::{Duration, Instant};
 
-use super::{BASE_DATAGRAM_SIZE, Controller, ControllerFactory};
+use super::{BASE_DATAGRAM_SIZE, Controller, ControllerFactory, TransferableState};
 
 mod bw_estimation;
 mod min_max;
@@ -504,6 +504,41 @@ impl Controller for Bbr {
 
     fn into_any(self: Box<Self>) -> Box<dyn Any> {
         self
+    }
+
+    fn transferable_state(&self) -> TransferableState {
+        TransferableState {
+            congestion_window: self.cwnd,
+            ssthresh: None, // BBR doesn't use ssthresh
+            in_recovery: self.recovery_state.in_recovery(),
+        }
+    }
+
+    fn apply_transferred_state(&mut self, state: &TransferableState) -> bool {
+        // Set the congestion window, ensuring it meets minimum requirements
+        self.cwnd = state.congestion_window.max(self.min_cwnd);
+
+        // BBR needs to rediscover bandwidth and RTT, so we reset to Startup mode
+        // This allows BBR to quickly probe for the correct bandwidth
+        self.mode = Mode::Startup;
+        self.is_at_full_bandwidth = false;
+        self.recovery_state = RecoveryState::NotInRecovery;
+        self.recovery_window = 0;
+
+        // Reset bandwidth estimation - will be rediscovered
+        self.max_bandwidth = BandwidthEstimation::default();
+        self.bw_at_last_round = 0;
+        self.round_wo_bw_gain = 0;
+
+        // Reset pacing
+        self.pacing_gain = self.high_gain;
+        self.cwnd_gain = self.high_cwnd_gain;
+
+        true
+    }
+
+    fn name(&self) -> &'static str {
+        "bbr"
     }
 }
 

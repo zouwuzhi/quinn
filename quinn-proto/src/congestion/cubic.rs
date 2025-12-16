@@ -2,7 +2,7 @@ use std::any::Any;
 use std::cmp;
 use std::sync::Arc;
 
-use super::{BASE_DATAGRAM_SIZE, Controller, ControllerFactory};
+use super::{BASE_DATAGRAM_SIZE, Controller, ControllerFactory, TransferableState};
 use crate::connection::RttEstimator;
 use crate::{Duration, Instant};
 
@@ -238,6 +238,29 @@ impl Controller for Cubic {
 
     fn into_any(self: Box<Self>) -> Box<dyn Any> {
         self
+    }
+
+    fn transferable_state(&self) -> TransferableState {
+        TransferableState {
+            congestion_window: self.window,
+            ssthresh: Some(self.ssthresh),
+            in_recovery: self.recovery_start_time.is_some(),
+        }
+    }
+
+    fn apply_transferred_state(&mut self, state: &TransferableState) -> bool {
+        self.window = state.congestion_window.max(self.minimum_window());
+        if let Some(ssthresh) = state.ssthresh {
+            self.ssthresh = ssthresh;
+        }
+        // Reset CUBIC-specific state
+        self.cubic_state = State::default();
+        self.recovery_start_time = None;
+        true
+    }
+
+    fn name(&self) -> &'static str {
+        "cubic"
     }
 }
 

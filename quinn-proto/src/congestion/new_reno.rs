@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use super::{BASE_DATAGRAM_SIZE, Controller, ControllerFactory};
+use super::{BASE_DATAGRAM_SIZE, Controller, ControllerFactory, TransferableState};
 use crate::Instant;
 use crate::connection::RttEstimator;
 
@@ -130,6 +130,28 @@ impl Controller for NewReno {
 
     fn into_any(self: Box<Self>) -> Box<dyn Any> {
         self
+    }
+
+    fn transferable_state(&self) -> TransferableState {
+        TransferableState {
+            congestion_window: self.window,
+            ssthresh: Some(self.ssthresh),
+            in_recovery: false, // NewReno uses time-based recovery detection
+        }
+    }
+
+    fn apply_transferred_state(&mut self, state: &TransferableState) -> bool {
+        self.window = state.congestion_window.max(self.minimum_window());
+        if let Some(ssthresh) = state.ssthresh {
+            self.ssthresh = ssthresh;
+        }
+        // Reset recovery-related state
+        self.bytes_acked = 0;
+        true
+    }
+
+    fn name(&self) -> &'static str {
+        "new_reno"
     }
 }
 

@@ -88,6 +88,7 @@ pub use streams::{
 };
 
 mod timer;
+use crate::congestion;
 use crate::congestion::Controller;
 use timer::{Timer, TimerTable};
 
@@ -1431,6 +1432,56 @@ impl Connection {
         if self.streams.set_receive_window(receive_window) {
             self.spaces[SpaceId::Data].pending.max_data = true;
         }
+    }
+
+    /// Dynamically switch the congestion control algorithm
+    ///
+    /// This allows changing the congestion controller after a connection has been
+    /// established. The `strategy` parameter controls how state is transferred from
+    /// the old controller to the new one.
+    ///
+    /// # Arguments
+    ///
+    /// * `factory` - Factory for creating the new congestion controller
+    /// * `strategy` - Strategy for transferring state to the new controller
+    /// * `now` - Current time, used for initializing the new controller
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::sync::Arc;
+    /// use quinn_proto::congestion::{BbrConfig, CubicConfig};
+    /// use quinn_proto::CongestionSwitchStrategy;
+    ///
+    /// // Switch from default (CUBIC) to BBR with fresh state
+    /// connection.set_congestion_controller(
+    ///     Arc::new(BbrConfig::default()),
+    ///     CongestionSwitchStrategy::Fresh,
+    ///     now,
+    /// );
+    ///
+    /// // Switch back to CUBIC, preserving some state
+    /// connection.set_congestion_controller(
+    ///     Arc::new(CubicConfig::default()),
+    ///     CongestionSwitchStrategy::Conservative,
+    ///     now,
+    /// );
+    /// ```
+    pub fn set_congestion_controller(
+        &mut self,
+        factory: Arc<dyn congestion::ControllerFactory + Send + Sync>,
+        strategy: CongestionSwitchStrategy,
+        now: Instant,
+    ) {
+        self.path.set_congestion_controller(factory, strategy, now);
+    }
+
+    /// Get the name of the current congestion controller
+    ///
+    /// Returns a static string identifying the congestion control algorithm
+    /// currently in use (e.g., "cubic", "bbr", "new_reno").
+    pub fn congestion_controller_name(&self) -> &'static str {
+        self.path.congestion.name()
     }
 
     fn on_ack_received(
@@ -3856,6 +3907,55 @@ impl SideArgs {
             Self::Server { .. } => Side::Server,
         }
     }
+}
+
+/// Strategy for transferring state when switching congestion control algorithms
+///
+/// Different strategies provide different trade-offs between stability and performance
+/// when dynamically switching congestion controllers.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum CongestionSwitchStrategy {
+    /// Start fresh with the new algorithm's initial state
+    ///
+    /// This is the safest option as it avoids any state compatibility issues.
+    /// The new controller will start from its initial congestion window and
+    /// use slow start to probe for available bandwidth.
+    ///
+    /// **Trade-off**: May cause temporary throughput reduction while the new
+    /// algorithm probes for bandwidth.
+    #[default]
+    Fresh,
+
+    /// Use a conservative initial state based on the previous controller
+    ///
+    /// Transfers a limited congestion window (minimum of current window and
+    /// 2x initial window) and the slow start threshold. This provides some
+    /// continuity while avoiding aggressive behavior.
+    ///
+    /// **Trade-off**: Balances stability and performance, but may still cause
+    /// some throughput variation.
+    Conservative,
+
+    /// Attempt to maintain current throughput by transferring full state
+    ///
+    /// Transfers the full congestion window and slow start threshold from
+    /// the previous controller. If the previous controller was in recovery,
+    /// falls back to Conservative strategy.
+    ///
+    /// **Trade-off**: Best for maintaining throughput, but may cause packet
+    /// loss if the new algorithm interprets the state differently.
+    Aggressive,
+
+    /// Use a custom initial window and optional slow start threshold
+    ///
+    /// Allows complete control over the initial state of the new controller.
+    /// Useful for advanced use cases or testing.
+    WithWindow {
+        /// Initial congestion window in bytes
+        cwnd: u64,
+        /// Optional slow start threshold in bytes
+        ssthresh: Option<u64>,
+    },
 }
 
 /// Reasons why a connection might be lost
